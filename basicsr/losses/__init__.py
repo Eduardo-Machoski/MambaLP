@@ -5,9 +5,12 @@ from basicsr.utils.registry import LOSS_REGISTRY
 from .losses import (CharbonnierLoss, GANLoss, L1Loss, MSELoss, WeightedTVLoss, g_path_regularize,
                      gradient_penalty_loss, r1_penalty)
 
+from .perceptual_loss import PerceptualLoss
+from .contextual_loss import contextual_loss
+
 __all__ = [
     'L1Loss', 'MSELoss', 'CharbonnierLoss', 'WeightedTVLoss', 'GANLoss', 'gradient_penalty_loss',
-    'r1_penalty', 'g_path_regularize'
+    'r1_penalty', 'g_path_regularize', "PerceptualLoss", "contextual_loss"
 ]
 
 

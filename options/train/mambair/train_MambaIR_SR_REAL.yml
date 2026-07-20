@@ -1,0 +1,146 @@
+# -------------------------
+# MambaIR - Real Image Super-Resolution Training
+# For real LR images (non-aligned)
+# -------------------------
+
+name: MambaIR_RealSR
+model_type: MambaIRModel
+num_gpu: auto
+manual_seed: 9
+
+dataset_root: &dataset_root "/home/eafm23/datasets/UFPR-SR-plates"
+dataset_index: &dataset_index "split_all.csv"
+
+# ---------------------------------------
+# DATASET (real images are not aligned!)
+# ---------------------------------------
+datasets:
+  train:
+    task: SR
+    name: UFPR_Real
+    type: LPSRPlateDataset
+    phase: 'training'
+    io_backend:
+      type: disk
+
+
+
+    # DatasetConfig
+    gt_size: 64        
+    use_hflip: false   
+    use_rot: false     
+    scale: 2
+    dataroot: *dataset_root
+    index_file: *dataset_index
+
+
+    # DataLoader
+    use_shuffle: true
+    num_worker_per_gpu: 1
+    batch_size_per_gpu: 2
+    dataset_enlarge_ratio: 2
+
+  val:
+    name: UFPR_RealVal
+    type: LPSRPlateDataset
+    phase: 'validation'
+    scale: 2
+    gt_size: 64        
+    dataroot: *dataset_root
+    index_file: *dataset_index
+    io_backend:
+      type: disk
+
+# ---------------------------------------
+# NETWORK: MambaIR (unchanged)
+# ---------------------------------------
+network_g:
+  type: MambaIR
+  upscale: 2
+  in_chans: 3
+  img_size: 96
+  img_range: 1.
+  d_state: 16
+  embed_dim: 180
+  depths: [6,6,6,6,6,6]
+  mlp_ratio: 2
+  upsampler: 'pixelshuffle'
+  resi_connection: '1conv'
+
+# ---------------------------------------
+# PATH
+# ---------------------------------------
+path:
+  experiments_root: /home/eafm23/MambaIR/experiments/MambaIR_RealSR
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# ---------------------------------------
+# TRAINING CONFIG
+# ---------------------------------------
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4 
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [ !!int 50000, !!int 80000 ] 
+    gamma: 0.5
+
+  total_iter: !!int 100000
+  warmup_iter: -1
+
+  # ---------------------
+  # Real-SR loss functions
+  # ---------------------
+  pixel_opt:
+    type: CharbonnierLoss
+    loss_weight: 0.05
+    reduction: mean
+
+  perceptual_opt:
+    type: PerceptualLoss
+    perceptual_weight: 0.1
+    contextual_weight: 1.0
+    style_weight: 0.0
+
+    layer_weights:
+      '2': 0.01
+      '7': 0.05
+      '12': 0.1
+      '21': 1.0
+
+
+# ---------------------------------------
+# VALIDATION
+# ---------------------------------------
+val:
+  val_freq: !!int 5000
+  save_img: false
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+
+
+# ---------------------------------------
+# LOGGING
+# ---------------------------------------
+logger:
+  print_freq: 500
+  save_checkpoint_freq: !!int 15000
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+dist_params:
+  backend: nccl
+  port: 29500
+

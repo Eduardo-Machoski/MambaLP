@@ -8,6 +8,8 @@ from basicsr.utils.matlab_functions import rgb2ycbcr
 from basicsr.utils.registry import DATASET_REGISTRY
 
 import numpy as np
+import cv2
+
 
 @DATASET_REGISTRY.register()
 class PairedImageDataset(data.Dataset):
@@ -70,55 +72,55 @@ class PairedImageDataset(data.Dataset):
         if self.file_client is None:
             self.file_client = FileClient(self.io_backend_opt.pop('type'), **self.io_backend_opt)
 
-        scale = self.opt['scale']
 
         # Load gt and lq images. Dimension order: HWC; channel order: BGR;
+        # image range: [0, 1], float32., H W 3
+        gt_path = self.paths[index]['gt_path']
+        img_bytes = self.file_client.get(gt_path, 'gt')
+        img_gt = imfrombytes(img_bytes, float32=True)
+        lq_path = self.paths[index]['lq_path']
+        img_bytes = self.file_client.get(lq_path, 'lq')
+        img_lq = imfrombytes(img_bytes, float32=True)
 
-        if self.task == 'CAR':
-            # image range: [0, 255], int., H W 1
+        # Tamanho da LQ
+        h_lq, w_lq = img_lq.shape[:2]
+        scale = self.opt["scale"]   # 2
 
-            gt_path = self.paths[index]['gt_path']
-            img_bytes = self.file_client.get(gt_path, 'gt')
-            img_gt = imfrombytes(img_bytes, flag='grayscale', float32=False)
-            lq_path = self.paths[index]['lq_path']
-            img_bytes = self.file_client.get(lq_path, 'lq')
-            img_lq = imfrombytes(img_bytes, flag='grayscale', float32=False)
-            img_gt = np.expand_dims(img_gt, axis=2).astype(np.float32) / 255.
-            img_lq = np.expand_dims(img_lq, axis=2).astype(np.float32) / 255.
-    
-        elif self.task == 'denoising_gray': # Matlab + OpenCV version
-            gt_path = self.paths[index]['gt_path']
-            lq_path = gt_path
-            img_bytes = self.file_client.get(gt_path, 'gt')
-            # OpenCV version, following "Deep Convolutional Dictionary Learning for Image Denoising"
-            img_gt = imfrombytes(img_bytes, flag='grayscale', float32=True)
-            # # Matlab version (using this version may have 0.6dB improvement, which is unfair for comparison)
-            # img_gt = imfrombytes(img_bytes, flag='unchanged', float32=True)
-            # if img_gt.ndim != 2:
-            #     img_gt = rgb2ycbcr(cv2.cvtColor(img_gt, cv2.COLOR_BGR2RGB), y_only=True)
-            if self.opt['phase'] != 'train':
-                np.random.seed(seed=0)
-            img_lq = img_gt + np.random.normal(0, self.noise/255., img_gt.shape)
-            img_gt = np.expand_dims(img_gt, axis=2)
-            img_lq = np.expand_dims(img_lq, axis=2)
+        # Tamanho esperado da GT para uma rede x2
+        expected_h_gt = h_lq * scale
+        expected_w_gt = w_lq * scale
 
-        elif self.task == 'denoising_color':
-            gt_path = self.paths[index]['gt_path']
-            lq_path = gt_path
-            img_bytes = self.file_client.get(gt_path, 'gt')
-            img_gt = imfrombytes(img_bytes, float32=True)
-            if self.opt['phase'] != 'train':
-                np.random.seed(seed=0)
-            img_lq = img_gt + np.random.normal(0, self.noise/255., img_gt.shape)
+        # Redimensiona apenas a GT se necessário
+        if img_gt.shape[0] != expected_h_gt or img_gt.shape[1] != expected_w_gt:
+            img_gt = cv2.resize(
+                img_gt,
+                (expected_w_gt, expected_h_gt),
+                interpolation=cv2.INTER_CUBIC
+            )
 
-        else:
-            # image range: [0, 1], float32., H W 3
-            gt_path = self.paths[index]['gt_path']
-            img_bytes = self.file_client.get(gt_path, 'gt')
-            img_gt = imfrombytes(img_bytes, float32=True)
-            lq_path = self.paths[index]['lq_path']
-            img_bytes = self.file_client.get(lq_path, 'lq')
-            img_lq = imfrombytes(img_bytes, float32=True)
+        gt_size = self.opt['gt_size']
+        lq_patch_size = gt_size // scale
+
+        if h_lq < lq_patch_size or w_lq < lq_patch_size:
+
+            pad_h = max(0, lq_patch_size - h_lq)
+            pad_w = max(0, lq_patch_size - w_lq)
+
+            img_lq = cv2.copyMakeBorder(
+                img_lq,
+                0, pad_h,
+                0, pad_w,
+                cv2.BORDER_REFLECT_101
+            )
+
+            img_gt = cv2.copyMakeBorder(
+                img_gt,
+                0, pad_h * scale,
+                0, pad_w * scale,
+                cv2.BORDER_REFLECT_101
+            )
+
+        h_lq, w_lq = img_lq.shape[:2]
 
         # augmentation for training
         if self.opt['phase'] == 'train':
@@ -133,10 +135,13 @@ class PairedImageDataset(data.Dataset):
             img_gt = rgb2ycbcr(img_gt, y_only=True)[..., None]
             img_lq = rgb2ycbcr(img_lq, y_only=True)[..., None]
 
-        # crop the unmatched GT images during validation or testing, especially for SR benchmark datasets
-        # TODO: It is better to update the datasets, rather than force to crop
+
+        h_gt, w_gt = img_gt.shape[:2]
+        # Validation
         if self.opt['phase'] != 'train':
-            img_gt = img_gt[0:img_lq.shape[0] * scale, 0:img_lq.shape[1] * scale, :]
+            h = min(h_gt, round(h_lq * scale))
+            w = min(w_gt, round(w_lq * scale))
+            img_gt = img_gt[:h, :w, :]
 
         # BGR to RGB, HWC to CHW, numpy to tensor
         img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=True)
@@ -149,3 +154,6 @@ class PairedImageDataset(data.Dataset):
 
     def __len__(self):
         return len(self.paths)
+
+
+

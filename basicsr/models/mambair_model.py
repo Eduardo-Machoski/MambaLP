@@ -8,7 +8,7 @@ from basicsr.models.sr_model import SRModel
 @MODEL_REGISTRY.register()
 class MambaIRModel(SRModel):
     """MambaIR model for image restoration."""
-
+"""
     # test by partitioning
     def test(self):
         _, C, h, w = self.lq.size()
@@ -61,6 +61,7 @@ class MambaIRModel(SRModel):
                 outputs = []
                 for chop in img_chops:
                     out = self.net_g_ema(chop)  # image processing of each partition
+                    print(chop.shape, "->", out.shape)
                     outputs.append(out)
                 _img = torch.zeros(1, C, H * scale, W * scale)
                 # merge
@@ -104,3 +105,12 @@ class MambaIRModel(SRModel):
             self.net_g.train()
         _, _, h, w = self.output.size()
         self.output = self.output[:, :, 0:h - mod_pad_h * scale, 0:w - mod_pad_w * scale]
+        """
+
+def test(self):
+    self.net_g.eval()
+
+    with torch.no_grad():
+        self.output = self.net_g(self.lq)
+
+    self.net_g.train()

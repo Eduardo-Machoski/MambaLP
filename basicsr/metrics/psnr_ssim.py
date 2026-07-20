@@ -5,6 +5,7 @@ from basicsr.metrics.metric_util import reorder_image, to_y_channel
 from basicsr.utils.registry import METRIC_REGISTRY
 
 
+
 @METRIC_REGISTRY.register()
 def calculate_psnr(img, img2, crop_border, input_order='HWC', test_y_channel=False, **kwargs):
     """Calculate PSNR (Peak Signal-to-Noise Ratio).
@@ -23,7 +24,8 @@ def calculate_psnr(img, img2, crop_border, input_order='HWC', test_y_channel=Fal
     Returns:
         float: psnr result.
     """
-
+    if img.shape != img2.shape:
+        img2 = cv2.resize(img2, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
     assert img.shape == img2.shape, (f'Image shapes are different: {img.shape}, {img2.shape}.')
     if input_order not in ['HWC', 'CHW']:
         raise ValueError(f'Wrong input_order {input_order}. Supported input_orders are "HWC" and "CHW"')
@@ -105,7 +107,8 @@ def calculate_ssim(img, img2, crop_border, input_order='HWC', test_y_channel=Fal
     Returns:
         float: ssim result.
     """
-
+    if img.shape != img2.shape:
+        img2 = cv2.resize(img2, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
     assert img.shape == img2.shape, (f'Image shapes are different: {img.shape}, {img2.shape}.')
     if input_order not in ['HWC', 'CHW']:
         raise ValueError(f'Wrong input_order {input_order}. Supported input_orders are "HWC" and "CHW"')

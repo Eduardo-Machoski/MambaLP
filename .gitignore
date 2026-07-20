@@ -1,0 +1,23 @@
+# Logs e resultados de treinamento
+tb_logger/
+experiments/
+results/
+wandb/
+acompanhar.txt
+RODANDO
+
+# Pesos
+*.pth
+*.pt
+*.ckpt
+
+# Python
+__pycache__/
+*.py[cod]
+
+
+# Imagens/datasets
+*.png
+*.jpeg
+*.jpg
+datasets/*

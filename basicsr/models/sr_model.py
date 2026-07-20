@@ -58,6 +58,11 @@ class SRModel(BaseModel):
         else:
             self.cri_pix = None
 
+        if train_opt.get('contextual_opt'):
+            self.cri_contextual = build_loss(train_opt['contextual_opt'])
+        else:
+            self.cri_contextual = None
+
         if train_opt.get('perceptual_opt'):
             self.cri_perceptual = build_loss(train_opt['perceptual_opt']).to(self.device)
         else:
@@ -102,13 +107,24 @@ class SRModel(BaseModel):
             loss_dict['l_pix'] = l_pix
         # perceptual loss
         if self.cri_perceptual:
-            l_percep, l_style = self.cri_perceptual(self.output, self.gt)
+            l_percep, l_style, l_context = self.cri_perceptual(self.output, self.gt)
             if l_percep is not None:
                 l_total += l_percep
                 loss_dict['l_percep'] = l_percep
             if l_style is not None:
                 l_total += l_style
                 loss_dict['l_style'] = l_style
+            if l_context is not None:
+                l_total += l_context
+                loss_dict['l_context'] = l_context
+        # contextual loss
+        if self.cri_contextual:
+
+            l_context = self.cri_contextual(self.output, self.gt)
+
+            l_total += l_context
+
+            loss_dict['l_context'] = l_context
 
         l_total.backward()
         self.optimizer_g.step()
@@ -128,54 +144,6 @@ class SRModel(BaseModel):
             with torch.no_grad():
                 self.output = self.net_g(self.lq)
             self.net_g.train()
-
-    def test_selfensemble(self):
-        # TODO: to be tested
-        # 8 augmentations
-        # modified from https://github.com/thstkdgus35/EDSR-PyTorch
-
-        def _transform(v, op):
-            # if self.precision != 'single': v = v.float()
-            v2np = v.data.cpu().numpy()
-            if op == 'v':
-                tfnp = v2np[:, :, :, ::-1].copy()
-            elif op == 'h':
-                tfnp = v2np[:, :, ::-1, :].copy()
-            elif op == 't':
-                tfnp = v2np.transpose((0, 1, 3, 2)).copy()
-
-            ret = torch.Tensor(tfnp).to(self.device)
-            # if self.precision == 'half': ret = ret.half()
-
-            return ret
-
-        # prepare augmented data
-        lq_list = [self.lq]
-        for tf in 'v', 'h', 't':
-            lq_list.extend([_transform(t, tf) for t in lq_list])
-
-        # inference
-        if hasattr(self, 'net_g_ema'):
-            self.net_g_ema.eval()
-            with torch.no_grad():
-                out_list = [self.net_g_ema(aug) for aug in lq_list]
-        else:
-            self.net_g.eval()
-            with torch.no_grad():
-                out_list = [self.net_g(aug) for aug in lq_list]
-            self.net_g.train()
-
-        # merge results
-        for i in range(len(out_list)):
-            if i > 3:
-                out_list[i] = _transform(out_list[i], 't')
-            if i % 4 > 1:
-                out_list[i] = _transform(out_list[i], 'h')
-            if (i % 4) % 2 == 1:
-                out_list[i] = _transform(out_list[i], 'v')
-        output = torch.cat(out_list, dim=0)
-
-        self.output = output.mean(dim=0, keepdim=True)
 
 
     def dist_validation(self, dataloader, current_iter, tb_logger, save_img):

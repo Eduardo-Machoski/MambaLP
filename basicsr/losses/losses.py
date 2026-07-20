@@ -490,3 +490,34 @@ class GANFeatLoss(nn.Module):
                 unweighted_loss = self.loss_op(pred_fake[i][j], pred_real[i][j].detach())
                 loss += unweighted_loss / num_d
         return loss * self.loss_weight
+
+@LOSS_REGISTRY.register()
+class ContextualLoss(nn.Module):
+
+    def __init__(self,
+                 loss_weight=1.0,
+                 layer='relu3_4',
+                 distance_type='cosine',
+                 h=0.5):
+        super().__init__()
+
+        self.loss_weight = loss_weight
+        self.h = h
+        self.distance_type = distance_type
+
+    def forward(self, pred, target):
+
+        pred = pred.flatten(2)
+        target = target.flatten(2)
+
+        pred = F.normalize(pred, dim=1)
+        target = F.normalize(target, dim=1)
+
+        sim = torch.bmm(pred.transpose(1, 2), target)
+
+        cx = sim.max(dim=2)[0].mean(dim=1)
+
+        loss = -torch.log(cx + 1e-8)
+
+        return self.loss_weight * loss.mean()
+

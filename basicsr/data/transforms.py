@@ -1,6 +1,7 @@
 import cv2
 import random
 import torch
+import numpy as np
 
 
 def mod_crop(img, scale):
@@ -21,7 +22,6 @@ def mod_crop(img, scale):
     else:
         raise ValueError(f'Wrong img ndim: {img.ndim}.')
     return img
-
 
 def paired_random_crop(img_gts, img_lqs, gt_patch_size, scale, gt_path=None):
     """Paired random crop. Support Numpy array and Tensor inputs.

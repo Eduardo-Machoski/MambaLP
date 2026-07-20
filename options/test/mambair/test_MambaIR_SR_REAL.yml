@@ -1,0 +1,54 @@
+# general settings
+name: test_MambaIR_SR
+model_type: MambaIRModel
+scale: 2
+num_gpu: 1
+manual_seed: 10
+
+datasets:
+  test:  # the 1st test dataset
+    name: Set1
+    type: PairedImageDataset
+    dataroot_gt: /home/eafm23/MambaIR/datasets/UFPR/testing/HR
+    dataroot_lq: /home/eafm23/MambaIR/datasets/UFPR/testing/LR
+    filename_tmpl: '{}'
+    gt_size: 64
+    io_backend:
+      type: disk
+
+
+# network structures
+network_g:
+  type: MambaIR
+  upscale: 2
+  in_chans: 3
+  img_size: 96
+  img_range: 1.
+  d_state: 16
+  depths: [6, 6, 6, 6, 6, 6]
+  embed_dim: 180
+  mlp_ratio: 2
+  upsampler: 'pixelshuffle'
+  resi_connection: '1conv'
+
+# path
+path:
+  pretrain_network_g: /home/eafm23/MambaIR/experiments/MambaIR_RealSR/models/net_g_latest.pth
+  strict_load_g: true
+
+# validation settings
+val:
+  save_img: true
+  suffix: ~  # add suffix to saved images, if None, use exp name
+
+  metrics: ~
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+    enable: false
+
