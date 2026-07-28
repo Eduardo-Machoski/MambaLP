@@ -117,11 +117,13 @@ class OCRLoss(nn.Module):
             image = (image - self.mean) / self.std
         return image
 
-    def forward(self, sr_image: Tensor, labels: Sequence[str | bytes]) -> Tensor:
-        image = self._preprocess(sr_image)
+    def predict_logits(self, image: Tensor) -> Tensor:
+        """Return OCR logits in canonical ``(N, K, C)`` format.
 
-        # Do not use torch.no_grad() here: only OCR weights are frozen. The
-        # graph with respect to sr_image is required to train the SR model.
+        This method is used both by the differentiable loss and by validation
+        metrics, ensuring identical preprocessing and decoding.
+        """
+        image = self._preprocess(image)
         output = self.ocr_model(image)
         logits = output[1] if isinstance(output, (tuple, list)) else output
 
@@ -130,7 +132,42 @@ class OCRLoss(nn.Module):
                 f"Expected OCR logits shaped (N,K,C), got {logits.shape}."
             )
         if logits.shape[0] != image.shape[0]:
-            # Accept OCR implementations that return (K,N,C).
+            if logits.shape[1] == image.shape[0]:
+                logits = logits.permute(1, 0, 2)
+            else:
+                raise ValueError(
+                    "Could not identify the batch dimension in OCR logits."
+                )
+        return logits
+
+    @torch.no_grad()
+    def predict(self, image: Tensor) -> list[str]:
+        """Decode a batch of images into fixed-position plate strings."""
+        logits = self.predict_logits(image)
+        indices = logits.argmax(dim=-1)
+        alphabet = self.converter.alphabet
+
+        predictions = []
+        for row in indices:
+            # Keep '-' for blank so character positions are never shifted in
+            # the per-position validation statistics.
+            predictions.append("".join(alphabet[index] for index in row.tolist()))
+        return predictions
+
+    def forward(self, sr_image: Tensor, labels: Sequence[str | bytes]) -> Tensor:
+        image = self._preprocess(sr_image)
+
+        # Do not use torch.no_grad() here: only OCR weights are frozen. The
+        # graph with respect to sr_image is required to train the SR model.
+        # ``image`` is already preprocessed here, therefore execute only the
+        # model and normalize its output dimensions locally.
+        output = self.ocr_model(image)
+        logits = output[1] if isinstance(output, (tuple, list)) else output
+        if logits.ndim != 3:
+            raise ValueError(
+                f"Expected OCR logits shaped (N,K,C), got {logits.shape}."
+            )
+        if logits.shape[0] != image.shape[0]:
             if logits.shape[1] == image.shape[0]:
                 logits = logits.permute(1, 0, 2)
             else:

@@ -7,6 +7,7 @@ from basicsr.archs import build_network
 from basicsr.losses import build_loss
 from basicsr.losses.ocr_loss import load_ocr_loss
 from basicsr.metrics import calculate_metric
+from basicsr.metrics.ocr_recognition import OCRRecognitionMetrics
 from basicsr.utils import get_root_logger, imwrite, tensor2img
 from basicsr.utils.registry import MODEL_REGISTRY
 from .base_model import BaseModel
@@ -194,8 +195,21 @@ class SRModel(BaseModel):
 
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         dataset_name = dataloader.dataset.opt['name']
-        with_metrics = self.opt['val'].get('metrics') is not None
-        use_pbar = self.opt['val'].get('pbar', False)
+        val_opt = self.opt['val']
+        with_metrics = val_opt.get('metrics') is not None
+        use_pbar = val_opt.get('pbar', False)
+
+        ocr_metrics_opt = val_opt.get('ocr_metrics') or {}
+        use_ocr_metrics = bool(ocr_metrics_opt.get('enabled', False))
+        if use_ocr_metrics and self.cri_ocr is None:
+            raise RuntimeError(
+                'val.ocr_metrics.enabled=true requires train.ocr_opt to load the OCR model.'
+            )
+        ocr_results = OCRRecognitionMetrics() if use_ocr_metrics else None
+        ocr_examples = []
+        example_freq = int(ocr_metrics_opt.get('example_freq', 0) or 0)
+        log_examples = use_ocr_metrics and example_freq > 0 and current_iter % example_freq == 0
+        max_examples = int(ocr_metrics_opt.get('num_examples', 5))
 
         if with_metrics:
             if not hasattr(self, 'metric_results'):  # only execute in the first run
@@ -214,6 +228,17 @@ class SRModel(BaseModel):
             img_name = osp.splitext(osp.basename(val_data['lq_path'][0]))[0]
             self.feed_data(val_data)
             self.test()
+
+            if use_ocr_metrics:
+                labels = [str(label) for label in val_data['label']]
+                predictions = self.cri_ocr.predict(self.output)
+                ocr_results.update(labels, predictions)
+
+                if log_examples and len(ocr_examples) < max_examples:
+                    for label, prediction, path in zip(labels, predictions, val_data['lq_path']):
+                        if len(ocr_examples) >= max_examples:
+                            break
+                        ocr_examples.append((osp.basename(path), label, prediction))
 
             visuals = self.get_current_visuals()
             sr_img = tensor2img([visuals['result']])
@@ -258,6 +283,80 @@ class SRModel(BaseModel):
                 self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
 
             self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
+
+        if use_ocr_metrics:
+            self._log_ocr_metric_values(
+                current_iter,
+                dataset_name,
+                ocr_results,
+                ocr_examples,
+                tb_logger,
+                top_k=int(ocr_metrics_opt.get('top_k_errors', 10)),
+            )
+
+    def _log_ocr_metric_values(
+        self,
+        current_iter,
+        dataset_name,
+        results,
+        examples,
+        tb_logger,
+        top_k=10,
+    ):
+        logger = get_root_logger()
+        lines = [
+            f'OCR validation {dataset_name} @ {current_iter} iter',
+            (f'\t# plate_accuracy: {results.plate_accuracy:.4f} '
+             f'({results.correct_plates}/{results.total_plates})'),
+            '\t# accuracy_by_position:',
+        ]
+
+        for position, accuracy in results.position_accuracies().items():
+            correct = results.position_correct[position]
+            total = results.position_total[position]
+            lines.append(
+                f'\t  position_{position + 1}: {accuracy:.4f} ({correct}/{total})'
+            )
+
+        lines.append(f'\t# most_error_prone_characters (top {top_k}):')
+        error_rows = results.most_error_prone_chars(top_k)
+        if error_rows:
+            for char, errors, total, error_rate in error_rows:
+                lines.append(
+                    f'\t  {char}: {errors}/{total} errors ({error_rate:.2%})'
+                )
+        else:
+            lines.append('\t  none')
+
+        lines.append(f'\t# most_common_confusions (top {top_k}):')
+        confusion_rows = results.most_common_confusions(top_k)
+        if confusion_rows:
+            for expected, predicted, count in confusion_rows:
+                lines.append(f'\t  {expected} -> {predicted}: {count}')
+        else:
+            lines.append('\t  none')
+
+        if examples:
+            lines.append('\t# examples:')
+            for filename, target, prediction in examples:
+                status = 'OK' if target == prediction else 'ERROR'
+                lines.append(
+                    f'\t  [{status}] {filename}: GT={target} | OCR={prediction}'
+                )
+
+        logger.info('\n'.join(lines))
+
+        if tb_logger:
+            prefix = f'ocr/{dataset_name}'
+            tb_logger.add_scalar(
+                f'{prefix}/plate_accuracy', results.plate_accuracy, current_iter
+            )
+            for position, accuracy in results.position_accuracies().items():
+                tb_logger.add_scalar(
+                    f'{prefix}/position_{position + 1}_accuracy',
+                    accuracy,
+                    current_iter,
+                )
 
     def _log_validation_metric_values(self, current_iter, dataset_name, tb_logger):
         log_str = f'Validation {dataset_name}\n'

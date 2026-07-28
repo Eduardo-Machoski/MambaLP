@@ -124,8 +124,17 @@ train:
 # VALIDATION
 # ---------------------------------------
 val:
+  # OCR and image metrics are calculated at every validation milestone.
   val_freq: !!int 5000
   save_img: false
+
+  ocr_metrics:
+    enabled: true
+    # Log prediction examples only when current_iter is divisible by this value.
+    # Use the same value as val_freq to log examples at every milestone.
+    example_freq: !!int 5000
+    num_examples: 8
+    top_k_errors: 10
 
   metrics:
     psnr:
