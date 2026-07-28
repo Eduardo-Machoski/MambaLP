@@ -184,7 +184,7 @@ class LPSRPlateDataset(data.Dataset):
         return {
             "lq": img_lq,
             "gt": img_gt,
-            "ocr_gt": sample["ocr_gt"],
+            "label": sample["ocr_gt"],
             "lq_path": lq_path,
             "gt_path": gt_path,
         }

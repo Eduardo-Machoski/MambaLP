@@ -5,6 +5,7 @@ from tqdm import tqdm
 
 from basicsr.archs import build_network
 from basicsr.losses import build_loss
+from basicsr.losses.ocr_loss import load_ocr_loss
 from basicsr.metrics import calculate_metric
 from basicsr.utils import get_root_logger, imwrite, tensor2img
 from basicsr.utils.registry import MODEL_REGISTRY
@@ -68,8 +69,36 @@ class SRModel(BaseModel):
         else:
             self.cri_perceptual = None
 
-        if self.cri_pix is None and self.cri_perceptual is None:
-            raise ValueError('Both pixel and perceptual losses are None.')
+
+        # Loss OCR
+        ocr_opt = train_opt.get("ocr_opt")
+
+        if ocr_opt is not None:
+            input_size = ocr_opt.get("input_size")
+
+            if input_size is not None:
+                input_size = tuple(input_size)
+
+            self.cri_ocr = load_ocr_loss(
+                checkpoint_path=ocr_opt["load"],
+                alphabet=ocr_opt["alphabet"],
+                device=self.device,
+                loss_weight=ocr_opt.get(
+                    "loss_weight",
+                    0.01,
+                ),
+                input_size=input_size,
+                mean=ocr_opt.get("mean"),
+                std=ocr_opt.get("std"),
+            )
+
+            logger = get_root_logger()
+            logger.info(
+                f"OCR loss carregada de: {ocr_opt['load']}"
+            )
+        else:
+            self.cri_ocr = None
+
 
         # set up optimizers and schedulers
         self.setup_optimizers()
@@ -93,6 +122,8 @@ class SRModel(BaseModel):
         self.lq = data['lq'].to(self.device)
         if 'gt' in data:
             self.gt = data['gt'].to(self.device)
+
+        self.labels = data.get("label")
 
     def optimize_parameters(self, current_iter):
         self.optimizer_g.zero_grad()
@@ -125,6 +156,17 @@ class SRModel(BaseModel):
             l_total += l_context
 
             loss_dict['l_context'] = l_context
+
+        # OCR loss
+        if self.cri_ocr:
+
+            l_ocr = self.cri_ocr(
+                self.output,
+                self.labels,
+            )
+
+            l_total += l_ocr
+            loss_dict["l_ocr"] = l_ocr
 
         l_total.backward()
         self.optimizer_g.step()
