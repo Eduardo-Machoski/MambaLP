@@ -1,0 +1,174 @@
+# general settings for image SR training
+name: MambaIRv2_SR_x2
+model_type: MambaIRv2Model
+scale: 2
+num_gpu: auto
+manual_seed: 9
+
+#dataset_root: &dataset_root "/home/eafm23/datasets/UFPR-SR-plates"
+dataset_root: &dataset_root "/home/eafm23/datasets/LRLPR"
+dataset_index: &dataset_index "split_all.csv"
+
+lq_size_base: &lq_size_base
+  h: 36
+  w: 68
+
+
+# ---------------------------------------
+# DATASET (real images are not aligned!)
+# ---------------------------------------
+datasets:
+  train:
+    task: SR
+    name: UFPR_Real
+    type: LPSRPlateDataset
+    phase: 'training'
+    io_backend:
+      type: disk
+
+
+
+    # DatasetConfig
+    gt_size: 64
+    use_hflip: false
+    use_rot: false
+    scale: 2
+    dataroot: *dataset_root
+    index_file: *dataset_index
+
+
+    # DataLoader
+    use_shuffle: true
+    num_worker_per_gpu: 1
+    batch_size_per_gpu: 1
+    dataset_enlarge_ratio: 2
+    lq_size: *lq_size_base
+
+
+  val:
+    name: UFPR_RealVal
+    type: LPSRPlateDataset
+    phase: 'validation'
+    scale: 2
+    gt_size: 64
+    dataroot: *dataset_root
+    index_file: *dataset_index
+    lq_size: *lq_size_base
+    io_backend:
+      type: disk
+
+
+
+network_g:
+  type: MambaIRv2
+  upscale: 2
+  in_chans: 3
+  img_size: 64
+  img_range: 1.
+  embed_dim: 174
+  d_state: 16
+  depths: [6, 6, 6,6,6,6]
+  num_heads: [6,6,6,6,6,6]
+  window_size: 16
+  inner_rank: 64
+  num_tokens: 128
+  convffn_kernel_size: 5
+  mlp_ratio: 2.
+  upsampler: 'pixelshuffle'
+  resi_connection: '1conv'
+
+
+# ---------------------------------------
+# PATH
+# ---------------------------------------
+path:
+  experiments_root: /home/eafm23/MambaLP/experiments/MambaIRV2
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: /home/eafm23/MambaLP/experiments/best/MambaIRv2_SR_x2.pth
+
+
+# training settings
+train:
+  optim_g:
+    type: Adam
+    #lr: !!float 2e-4
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [!!int 50000, !!int 100000, !!int 150000, !!int 175000]
+    gamma: 0.5
+
+  total_iter: !!int 200000
+  warmup_iter: -1  # no warm up
+
+  # ---------------------
+  # Real-SR loss functions
+  # ---------------------
+  pixel_opt:
+    type: CharbonnierLoss
+    loss_weight: 0.05
+    reduction: mean
+
+  perceptual_opt:
+    type: PerceptualLoss
+    perceptual_weight: 0.1
+    contextual_weight: 1.0
+    style_weight: 0.0
+
+    layer_weights:
+      '2': 0.01
+      '7': 0.05
+      '12': 0.1
+      '21': 1.0
+
+  ocr_opt:
+    load: /home/eafm23/MambaLP/ocr/model.pth
+    alphabet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    loss_weight: 0.02
+    input_size: [32, 96]
+
+  viewer:
+    enabled: false
+
+# ---------------------------------------
+# VALIDATION
+# ---------------------------------------
+val:
+  # OCR and image metrics are calculated at every validation milestone.
+  val_freq: !!int 5000
+  save_img: false
+
+  ocr_metrics:
+    enabled: true
+    # Log prediction examples only when current_iter is divisible by this value.
+    # Use the same value as val_freq to log examples at every milestone.
+    example_freq: !!int 5000
+    num_examples: 10
+    top_k_errors: 10
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+
+
+
+
+
+# logging settings
+logger:
+  print_freq: 500
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500

@@ -1,4 +1,7 @@
 import torch
+import cv2
+import glob
+import sys
 from collections import OrderedDict
 from os import path as osp
 from tqdm import tqdm
@@ -8,8 +11,9 @@ from basicsr.losses import build_loss
 from basicsr.losses.ocr_loss import load_ocr_loss
 from basicsr.metrics import calculate_metric
 from basicsr.metrics.ocr_recognition import OCRRecognitionMetrics
-from basicsr.utils import get_root_logger, imwrite, tensor2img
+from basicsr.utils import get_root_logger, imwrite, tensor2img, img2tensor
 from basicsr.utils.registry import MODEL_REGISTRY
+from basicsr.utils.training_viewer import TrainingViewer
 from .base_model import BaseModel
 
 
@@ -33,6 +37,22 @@ class SRModel(BaseModel):
 
         if self.is_train:
             self.init_training_settings()
+
+        self.training_viewer = None
+
+        viewer_opt = self.opt.get(
+            "train",
+            {}
+        ).get(
+            "viewer",
+            {}
+        )
+
+        if (
+            self.is_train
+            and viewer_opt.get("enabled", False)
+        ):
+            self.training_viewer = TrainingViewer()
 
     def init_training_settings(self):
         self.net_g.train()
@@ -121,10 +141,12 @@ class SRModel(BaseModel):
 
     def feed_data(self, data):
         self.lq = data['lq'].to(self.device)
-        if 'gt' in data:
-            self.gt = data['gt'].to(self.device)
+        self.gt = data['gt'].to(self.device)
 
-        self.labels = data.get("label")
+        self.lq_path = data["lq_path"]
+        self.gt_path = data["gt_path"]
+
+        self.label = data.get("label")
 
     def optimize_parameters(self, current_iter):
         self.optimizer_g.zero_grad()
@@ -160,14 +182,21 @@ class SRModel(BaseModel):
 
         # OCR loss
         if self.cri_ocr:
-
+            ''' Old version, without cross entropy
             l_ocr = self.cri_ocr(
                 self.output,
-                self.labels,
+                self.gt,
+                self.label,
             )
+            '''
+            if not l_ocr.requires_grad:
+                raise RuntimeError("OCR loss is detached from the computational graph.")
+            l_ocr = self.cri_ocr.cross_entropy_loss(self.output, self.label,)
+
 
             l_total += l_ocr
             loss_dict["l_ocr"] = l_ocr
+
 
         l_total.backward()
         self.optimizer_g.step()
@@ -189,15 +218,193 @@ class SRModel(BaseModel):
             self.net_g.train()
 
 
-    def dist_validation(self, dataloader, current_iter, tb_logger, save_img):
-        if self.opt['rank'] == 0:
-            self.nondist_validation(dataloader, current_iter, tb_logger, save_img)
+    @staticmethod
+    def _update_validation_progress(current, total, bar_width=30):
+        if total <= 0:
+            return
+
+        progress = current / total
+        filled = int(bar_width * progress)
+
+        bar = "=" * filled + ">" + "." * max(0, bar_width - filled - 1)
+
+        message = (
+            f"\rValidation: [{bar}] "
+            f"{current}/{total} "
+            f"({progress * 100:6.2f}%)"
+        )
+
+        sys.stdout.write(message)
+
+        # Só cria uma nova linha quando a validação terminar.
+        if current >= total:
+            sys.stdout.write("\n")
+
+        sys.stdout.flush()
+
+
+
+
+    def nondist_validation_temporal(self, dataloader, current_iter, tb_logger, save_img):
+        total = len(dataloader)
+
+        dataset_name = dataloader.dataset.opt['name']
+        val_opt = self.opt['val']
+        ocr_metrics_opt = val_opt.get('ocr_metrics') or {}
+
+        # this function always does ocr recognition
+        if self.cri_ocr is None:
+            raise RuntimeError(
+                'val.ocr.metrics.enabled=true requires train.ocr_opt to load the OCR model.'
+            )
+        ocr_results = OCRRecognitionMetrics()
+        ocr_examples = []
+        example_freq = int(ocr_metrics_opt.get('example_freq', 0) or 0)
+        log_examples = example_freq > 0 and current_iter % example_freq == 0
+        max_examples = int(ocr_metrics_opt.get('num_examples', 5))
+
+        
+        with_metrics = val_opt.get('metrics') is not None
+        if with_metrics:
+            if not hasattr(self, 'metric_results'):  # only execute in the first run
+                self.metric_results = {metric: 0 for metric in self.opt['val']['metrics'].keys()}
+            self._initialize_best_metric_results(dataset_name)
+        # zero self.metric_results
+        if with_metrics:
+            self.metric_results = {metric: 0 for metric in self.metric_results}
+
+        metric_data = dict()
+
+        dataset = dataloader.dataset
+
+        for idx, val_data in enumerate(dataloader):
+            self._update_validation_progress(idx + 1, total)
+            original_lq_path = val_data["lq_path"][0]
+            folder = osp.dirname(original_lq_path)
+
+            sample = dataset.samples[idx]
+            gt_path = val_data["gt_path"][0]
+            label = val_data["label"]
+            if isinstance(label, (list, tuple)):
+                label = str(label[0])
+            else:
+                label = str(label)
+
+            # Finds all lq images in the same track
+            lq_paths = []
+
+            for extension in ("png", "jpg", "jpeg"):
+                lq_paths.extend(glob.glob(osp.join(folder, f"lr-*.{extension}")))
+
+            lq_paths = sorted(lq_paths)
+
+            if len(lq_paths) == 0:
+                logger.warning(f"Nenhuma imagem LR encontrada em {folder}")
+                continue
+
+            # OCR prediction for all SR images from the track
+            track_predictions = []
+
+            img_gt = None
+
+            for lq_path in lq_paths:
+                img_lq, img_gt = dataset.load_sample(sample, lq_path, gt_path)
+
+                # [C, H, W] -> [B, C, H, W]
+                img_lq = img_lq.unsqueeze(0)
+                img_gt = img_gt.unsqueeze(0)
+
+                current_data = {
+                        "lq": img_lq,
+                        "label": label,
+                        "lq_path": lq_path,
+                        "gt": img_gt,
+                        "gt_path": gt_path
+                    }
+
+                # SR
+                self.feed_data(current_data)
+                self.test()
+
+                # OCR
+                prediction = self.cri_ocr.predict(self.output)
+
+                if isinstance(prediction, (list, tuple)):
+                    if len(prediction) != 1:
+                        raise ValueError(
+                            f"Expected one OCR prediction, got {prediction}"
+                        )
+                    prediction = prediction[0]
+
+                prediction = str(prediction).strip().upper()
+                track_predictions.append(prediction)
+
+
+            final_prediction = ocr_results.majority_vote(track_predictions)
+
+            ocr_results.update([label], [final_prediction])
+            if log_examples and len(ocr_examples) < max_examples:
+                ocr_examples.append((osp.basename(lq_path), label, prediction))
+
+
+            visuals = self.get_current_visuals()
+            sr_img = tensor2img([visuals['result']])
+            metric_data['img'] = sr_img
+            if 'gt' in visuals:
+                gt_img = tensor2img([visuals['gt']])
+                metric_data['img2'] = gt_img
+                del self.gt
+
+            # tentative for out of GPU memory
+            del self.lq
+            del self.output
+            torch.cuda.empty_cache()
+
+
+            if save_img:
+                img_name = osp.splitext(osp.basename(lq_path))[0]
+                if self.opt['is_train']:
+                    save_img_path = osp.join(self.opt['path']['visualization'], img_name,
+                                             f'{img_name}_{current_iter}.png')
+                else:
+                    if self.opt['val']['suffix']:
+                        save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
+                                                 f'{img_name}_{self.opt["val"]["suffix"]}.png')
+                    else:
+                        save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
+                                                 f'{img_name}_{self.opt["name"]}.png')
+                imwrite(sr_img, save_img_path)
+
+            if with_metrics:
+                # calculate metrics
+                for name, opt_ in self.opt['val']['metrics'].items():
+                    self.metric_results[name] += calculate_metric(metric_data, opt_)
+
+
+        if with_metrics:
+            for metric in self.metric_results.keys():
+                self.metric_results[metric] /= (idx + 1)
+                # update the best metric result
+                self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
+
+            self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
+
+            self._log_ocr_metric_values(current_iter, dataset_name, ocr_results, ocr_examples, tb_logger, top_k=int(ocr_metrics_opt.get('top_k_errors', 10)),)
+
+        return {
+            'dataset': dataset_name,
+            'ocr': ocr_results.plate_accuracy,
+            'psnr': self.metric_results.get('psnr') if with_metrics else None,
+        }
+
+
+
 
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
+        total = len(dataloader)
         dataset_name = dataloader.dataset.opt['name']
         val_opt = self.opt['val']
         with_metrics = val_opt.get('metrics') is not None
-        use_pbar = val_opt.get('pbar', False)
 
         ocr_metrics_opt = val_opt.get('ocr_metrics') or {}
         use_ocr_metrics = bool(ocr_metrics_opt.get('enabled', False))
@@ -221,10 +428,9 @@ class SRModel(BaseModel):
             self.metric_results = {metric: 0 for metric in self.metric_results}
 
         metric_data = dict()
-        if use_pbar:
-            pbar = tqdm(total=len(dataloader), unit='image')
 
         for idx, val_data in enumerate(dataloader):
+            self._update_validation_progress(idx + 1, total)
             img_name = osp.splitext(osp.basename(val_data['lq_path'][0]))[0]
             self.feed_data(val_data)
             self.test()
@@ -270,11 +476,6 @@ class SRModel(BaseModel):
                 # calculate metrics
                 for name, opt_ in self.opt['val']['metrics'].items():
                     self.metric_results[name] += calculate_metric(metric_data, opt_)
-            if use_pbar:
-                pbar.update(1)
-                pbar.set_description(f'Test {img_name}')
-        if use_pbar:
-            pbar.close()
 
         if with_metrics:
             for metric in self.metric_results.keys():
@@ -283,6 +484,32 @@ class SRModel(BaseModel):
                 self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
 
             self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
+            if save_img:
+                if self.opt['is_train']:
+                    save_img_path = osp.join(self.opt['path']['visualization'], img_name,
+                                             f'{img_name}_{current_iter}.png')
+                else:
+                    if self.opt['val']['suffix']:
+                        save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
+                                                 f'{img_name}_{self.opt["val"]["suffix"]}.png')
+                    else:
+                        save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
+                                                 f'{img_name}_{self.opt["name"]}.png')
+                imwrite(sr_img, save_img_path)
+
+            if with_metrics:
+                # calculate metrics
+                for name, opt_ in self.opt['val']['metrics'].items():
+                    self.metric_results[name] += calculate_metric(metric_data, opt_)
+
+        if with_metrics:
+            for metric in self.metric_results.keys():
+                self.metric_results[metric] /= (idx + 1)
+                # update the best metric result
+                self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
+
+            self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
+
 
         if use_ocr_metrics:
             self._log_ocr_metric_values(
@@ -293,6 +520,12 @@ class SRModel(BaseModel):
                 tb_logger,
                 top_k=int(ocr_metrics_opt.get('top_k_errors', 10)),
             )
+
+        return {
+            'dataset': dataset_name,
+            'ocr': ocr_results.plate_accuracy if use_ocr_metrics else None,
+            'psnr': self.metric_results.get('psnr') if with_metrics else None,
+        }
 
     def _log_ocr_metric_values(
         self,
@@ -387,3 +620,152 @@ class SRModel(BaseModel):
         else:
             self.save_network(self.net_g, 'net_g', current_iter)
         self.save_training_state(epoch, current_iter)
+
+    def save_best(self):
+        """Save only the generator weights using the stable best.pth name."""
+        if hasattr(self, 'net_g_ema'):
+            self.save_network(
+                [self.net_g, self.net_g_ema],
+                'net_g',
+                'best',
+                param_key=['params', 'params_ema'],
+                save_filename='best.pth',
+            )
+        else:
+            self.save_network(
+                self.net_g,
+                'net_g',
+                'best',
+                save_filename='best.pth',
+            )
+
+
+    @torch.no_grad()
+    def update_training_viewer(self, current_iter: int,) -> None:
+
+        if self.training_viewer is None:
+            return
+
+        if not self.training_viewer.next_requested():
+            return
+
+        sample_idx = 0
+
+        lq = self.lq[sample_idx:sample_idx + 1]
+        hr_model = self.gt[sample_idx:sample_idx + 1]
+        sr = self.output[sample_idx:sample_idx + 1]
+        path = self.gt_path[sample_idx:sample_idx + 1]
+        label = self.label[sample_idx]
+        hr_original, hr_original_tensor = self._load_original_hr(sample_idx)
+        hr_original_tensor = hr_original_tensor.to(self.device)
+
+        ocr_hr_original = self.cri_ocr.predict(hr_original_tensor)
+        ocr_hr_model = self.cri_ocr.predict(hr_model)
+        ocr_sr = self.cri_ocr.predict(sr)
+
+        # =========================================================
+        # Caso predict retorne lista
+        # =========================================================
+
+        if isinstance(
+            ocr_hr_original,
+            (list, tuple),
+        ):
+            ocr_hr_original = ocr_hr_original[0]
+
+        if isinstance(
+            ocr_hr_model,
+            (list, tuple),
+        ):
+            ocr_hr_model = ocr_hr_model[0]
+
+        if isinstance(
+            ocr_sr,
+            (list, tuple),
+        ):
+            ocr_sr = ocr_sr[0]
+
+
+        # =========================================================
+        # Envia para processo da interface
+        # =========================================================
+
+        data = {
+            "iteration": current_iter,
+
+            "label": str(label),
+
+            "lq": lq,
+
+            "hr_original": hr_original,
+
+            "hr_model": hr_model,
+
+            "sr": sr,
+
+            "ocr_hr_original": str(
+                ocr_hr_original
+            ),
+
+            "ocr_hr_model": str(
+                ocr_hr_model
+            ),
+
+            "ocr_sr": str(
+                ocr_sr
+            ),
+
+            "path": str(
+                path
+            ),
+        }
+
+        self.training_viewer.send(data)
+
+    def _load_original_hr(
+        self,
+        sample_idx: int,
+    ):
+
+        gt_path = self.gt_path[sample_idx]
+
+        # OpenCV carrega em BGR
+        hr_original = cv2.imread(
+            gt_path,
+            cv2.IMREAD_COLOR,
+        )
+
+        if hr_original is None:
+            raise RuntimeError(
+                f"Não foi possível carregar HR original: {gt_path}"
+            )
+
+        # ---------------------------------------------------------
+        # Tensor para OCR
+        #
+        # Precisa reproduzir o mesmo pipeline do Dataset:
+        # BGR -> RGB
+        # uint8 [0,255] -> float32 [0,1]
+        # HWC -> CHW
+        # adiciona batch
+        # ---------------------------------------------------------
+
+        hr_rgb = cv2.cvtColor(
+            hr_original,
+            cv2.COLOR_BGR2RGB,
+        )
+
+        hr_original_tensor = (
+            torch.from_numpy(
+                hr_rgb.copy()
+            )
+            .permute(2, 0, 1)
+            .float()
+            .div(255.0)
+            .unsqueeze(0)
+        )
+
+        return (
+            hr_original,
+            hr_original_tensor,
+        )

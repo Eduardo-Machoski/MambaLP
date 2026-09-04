@@ -9,6 +9,8 @@ sys.path.append(parent_dir)
 
 import logging
 import math
+import json
+import shutil
 import time
 import torch
 from os import path as osp
@@ -20,6 +22,79 @@ from basicsr.models import build_model
 from basicsr.utils import (AvgTimer, MessageLogger, check_resume, get_env_info, get_root_logger, get_time_str,
                            init_tb_logger, init_wandb_logger, make_exp_dirs, mkdir_and_rename, scandir)
 from basicsr.utils.options import copy_opt_file, dict2str, parse_options
+
+
+def update_best_checkpoint(model, validation_results, current_iter, logger):
+    """Save a checkpoint when OCR improves, using PSNR as the tie-breaker."""
+    results = [result for result in validation_results if result is not None]
+    if not results:
+        logger.info(f'Checkpoint @ {current_iter}: not saved (no validation result).')
+        return False
+
+    if any(result['ocr'] is None or result['psnr'] is None for result in results):
+        logger.info(
+            f'Checkpoint @ {current_iter}: not saved '
+            '(validation must provide OCR plate_accuracy and PSNR).'
+        )
+        return False
+
+    # Multiple validation datasets are represented by their arithmetic mean.
+    current_ocr = sum(result['ocr'] for result in results) / len(results)
+    current_psnr = sum(result['psnr'] for result in results) / len(results)
+    models_dir = model.opt['path']['models']
+    metadata_path = osp.join(models_dir, 'best_metrics.json')
+    best_path = osp.join(models_dir, 'best.pth')
+
+    best = None
+    if osp.isfile(metadata_path):
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as metadata_file:
+                best = json.load(metadata_file)
+        except (OSError, ValueError, TypeError) as error:
+            logger.warning(f'Could not read {metadata_path}: {error}. Reinitializing best metrics.')
+
+    if best is not None and not osp.isfile(best_path):
+        logger.warning(
+            f'{metadata_path} exists but best.pth does not. Reinitializing best metrics.'
+        )
+        best = None
+
+    is_best = (
+        best is None
+        or current_ocr > best['ocr']
+        or (current_ocr == best['ocr'] and current_psnr > best['psnr'])
+    )
+    if not is_best:
+        logger.info(
+            f'Checkpoint @ {current_iter}: not saved; not the best. '
+            f'OCR={current_ocr:.4f}, PSNR={current_psnr:.4f}; '
+            f'best OCR={best["ocr"]:.4f}, PSNR={best["psnr"]:.4f} '
+            f'@ {best["iter"]} iter.'
+        )
+        return False
+
+    if best is not None and osp.isfile(best_path):
+        archived_path = osp.join(models_dir, f'{best["iter"]}.pth')
+        if not osp.exists(archived_path):
+            shutil.copy2(best_path, archived_path)
+        else:
+            logger.warning(
+                f'Previous best archive {archived_path} already exists; keeping it unchanged.'
+            )
+
+    model.save_best()
+    metadata = {'iter': current_iter, 'ocr': current_ocr, 'psnr': current_psnr}
+    temporary_metadata_path = f'{metadata_path}.tmp'
+    with open(temporary_metadata_path, 'w', encoding='utf-8') as metadata_file:
+        json.dump(metadata, metadata_file, indent=2)
+    os.replace(temporary_metadata_path, metadata_path)
+
+    previous = 'first validation' if best is None else f'previous best @ {best["iter"]} iter'
+    logger.info(
+        f'Checkpoint @ {current_iter}: saved as best.pth; new best. '
+        f'OCR={current_ocr:.4f}, PSNR={current_psnr:.4f} ({previous}).'
+    )
+    return True
 
 
 def init_tb_loggers(opt):
@@ -133,8 +208,6 @@ def train_pipeline(root_path):
     if resume_state:  # resume training
         model.resume_training(resume_state)  # handle optimizers and schedulers
         logger.info(f"Resuming training from epoch: {resume_state['epoch']}, iter: {resume_state['iter']}.")
-        start_epoch = resume_state['epoch']
-        current_iter = resume_state['iter']
     else:
         start_epoch = 0
         current_iter = 0
@@ -176,6 +249,7 @@ def train_pipeline(root_path):
             # training
             model.feed_data(train_data)
             model.optimize_parameters(current_iter)
+            model.update_training_viewer(current_iter)
 
             iter_timer.record()
             if current_iter == 1:
@@ -190,17 +264,16 @@ def train_pipeline(root_path):
                 log_vars.update(model.get_current_log())
                 msg_logger(log_vars)
 
-            # save models and training states
-            if current_iter % opt['logger']['save_checkpoint_freq'] == 0:
-                logger.info('Saving models and training states.')
-                model.save(epoch, current_iter)
-
             # validation
             if opt.get('val') is not None and (current_iter % opt['val']['val_freq'] == 0):
                 if len(val_loaders) > 1:
                     logger.warning('Multiple validation datasets are *only* supported by SRModel.')
+                validation_results = []
                 for val_loader in val_loaders:
-                    model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
+                    validation_results.append(
+                        model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
+                    )
+                update_best_checkpoint(model, validation_results, current_iter, logger)
 
             data_timer.start()
             iter_timer.start()
@@ -211,11 +284,13 @@ def train_pipeline(root_path):
 
     consumed_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     logger.info(f'End of training. Time consumed: {consumed_time}')
-    logger.info('Save the latest model.')
-    model.save(epoch=-1, current_iter=-1)  # -1 stands for the latest
     if opt.get('val') is not None:
+        validation_results = []
         for val_loader in val_loaders:
-            model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
+            validation_results.append(
+                model.validation(val_loader, current_iter, tb_logger, opt['val']['save_img'])
+            )
+        update_best_checkpoint(model, validation_results, current_iter, logger)
     if tb_logger:
         tb_logger.close()
 

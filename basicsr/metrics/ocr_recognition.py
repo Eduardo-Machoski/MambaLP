@@ -42,6 +42,27 @@ class OCRRecognitionMetrics:
                         self.char_errors[expected] += 1
                         self.confusions[(expected, predicted)] += 1
 
+
+    def majority_vote(self, predictions: Iterable[str]) -> str:
+        predictions = [str(prediction).strip().upper() for prediction in predictions]
+
+        if not predictions:
+            return ""
+
+        max_len = max(len(prediction) for prediction in predictions)
+
+        result = []
+
+        for position in range(max_len):
+            chars = [prediction[position] for prediction in predictions]
+
+            if chars:
+                most_common_char = Counter(chars).most_common(1)[0][0]
+                result.append(most_common_char)
+
+        return "".join(result)
+
+
     @property
     def plate_accuracy(self) -> float:
         if self.total_plates == 0:
@@ -68,3 +89,5 @@ class OCRRecognitionMetrics:
             (expected, predicted, count)
             for (expected, predicted), count in self.confusions.most_common(limit)
         ]
+
+
