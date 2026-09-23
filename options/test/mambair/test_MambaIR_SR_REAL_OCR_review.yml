@@ -1,0 +1,54 @@
+# Revisão manual das SR do split de treinamento com o OCR usado no treino.
+# Execute na raiz do projeto MambaLP:
+# python revisar_sr_ocr.py -opt options/test/mambair/test_MambaIR_SR_REAL_OCR_review.yml
+
+name: MambaIR_RealSR_OCRReview
+model_type: MambaIRModel
+num_gpu: auto
+manual_seed: 99
+
+datasets:
+  train:
+    task: SR
+    name: UFPR_RealTrainReview
+    type: LPSRPlateDataset
+    phase: train
+    io_backend:
+      type: disk
+    use_hflip: false
+    use_rot: false
+    scale: 2
+    dataroot: /home/machoski/Desktop/datasets/LRLPR/
+    index_file: split_all.csv
+    lq_size:
+      h: 32
+      w: 64
+
+network_g:
+  type: MambaIR
+  upscale: 2
+  in_chans: 3
+  img_size: 96
+  img_range: 1.0
+  d_state: 16
+  embed_dim: 180
+  depths: [6, 6, 6, 6, 6, 6]
+  mlp_ratio: 2
+  upsampler: pixelshuffle
+  resi_connection: 1conv
+
+path:
+  # best.pth salvo pelo save_best() em train.py; ajuste se o experimento
+  # estiver em outro diretório.
+  pretrain_network_g: /home/machoski/Desktop/MambaLP/experiments/MambaIR_RealSR/models/best.pth
+  param_key_g: params
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  # O revisor carrega este mesmo OCR e usa predict() sobre a saída da SR.
+  ocr_opt:
+    load: /home/machoski/Desktop/MambaLP/ocr/model.pth
+    alphabet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    loss_weight: 0.01
+    input_size: [32, 96]

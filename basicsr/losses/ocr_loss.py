@@ -335,7 +335,8 @@ class OCRLoss(nn.Module):
 
         targets = self.converter.encode_list(
             labels,
-            K=num_positions,
+            num_positions,
+            device=sr_logits.device,
         ).to(
             device=sr_logits.device,
             dtype=torch.long,

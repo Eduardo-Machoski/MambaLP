@@ -58,6 +58,13 @@ class SRModel(BaseModel):
         self.net_g.train()
         train_opt = self.opt['train']
 
+        self.use_amp = train_opt.get("use_amp", False)
+
+        self.grad_scaler = torch.amp.GradScaler(
+            "cuda",
+            enabled=self.use_amp,
+        )
+
         self.ema_decay = train_opt.get('ema_decay', 0)
         if self.ema_decay > 0:
             logger = get_root_logger()
@@ -90,6 +97,11 @@ class SRModel(BaseModel):
         else:
             self.cri_perceptual = None
 
+        if train_opt.get("ssim_opt") is not None:
+            self.cri_ssim = build_loss(train_opt['ssim_opt']).to(self.device)
+        else:
+            self.cri_ssim = None
+
 
         # Loss OCR
         ocr_opt = train_opt.get("ocr_opt")
@@ -112,6 +124,9 @@ class SRModel(BaseModel):
                 mean=ocr_opt.get("mean"),
                 std=ocr_opt.get("std"),
             )
+
+            self.cri_ocr.eval()
+            self.cri_ocr.requires_grad_(False)
 
             logger = get_root_logger()
             logger.info(
@@ -149,7 +164,7 @@ class SRModel(BaseModel):
         self.label = data.get("label")
 
     def optimize_parameters(self, current_iter):
-        self.optimizer_g.zero_grad()
+        self.optimizer_g.zero_grad(set_to_none=True)
         self.output = self.net_g(self.lq)
 
         l_total = 0
@@ -189,13 +204,24 @@ class SRModel(BaseModel):
                 self.label,
             )
             '''
-            if not l_ocr.requires_grad:
-                raise RuntimeError("OCR loss is detached from the computational graph.")
+            self.cri_ocr.eval()
+            for parameter in self.cri_ocr.parameters():
+                parameter.requires_grad_(False)
+
+
             l_ocr = self.cri_ocr.cross_entropy_loss(self.output, self.label,)
 
+            if not l_ocr.requires_grad:
+                raise RuntimeError("OCR loss is detached from the computational graph.")
 
             l_total += l_ocr
             loss_dict["l_ocr"] = l_ocr
+
+        # SSIM loss
+        if self.cri_ssim:
+            l_ssim = self.cri_ssim(self.output, self.gt)
+            l_total += l_ssim
+            loss_dict["l_ssim"] = l_ssim
 
 
         l_total.backward()

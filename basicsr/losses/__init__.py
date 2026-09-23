@@ -7,6 +7,7 @@ from .losses import (CharbonnierLoss, GANLoss, L1Loss, MSELoss, WeightedTVLoss, 
 
 from .perceptual_loss import PerceptualLoss
 from .contextual_loss import contextual_loss
+from .ssim_loss import SSIMLoss
 
 __all__ = [
     'L1Loss', 'MSELoss', 'CharbonnierLoss', 'WeightedTVLoss', 'GANLoss', 'gradient_penalty_loss',

@@ -8,14 +8,14 @@ model_type: MambaIRModel
 num_gpu: auto
 manual_seed: 99
 
-dataset_root: &dataset_root "/home/eafm23/datasets/LRLPR"
+dataset_root: &dataset_root "/home/machoski/Desktop/datasets/LRLPR/"
 #dataset_index: &dataset_index "split_scenario_B.csv"
 #dataset_index: &dataset_index "split_teste.csv"
 dataset_index: &dataset_index "split_all.csv"
 
 lq_size_base: &lq_size_base
-  h: 36
-  w: 68
+  h: 32
+  w: 64
 
 # ---------------------------------------
 # DATASET (real images are not aligned!)
@@ -26,6 +26,7 @@ datasets:
     name: UFPR_Real
     type: LPSRPlateDataset
     phase: 'training'
+    use_amp: true
     io_backend:
       type: disk
 
@@ -78,11 +79,11 @@ network_g:
 # PATH
 # ---------------------------------------
 path:
-  experiments_root: /home/eafm23/MambaLP/experiments/MambaIR_RealSR/
+  experiments_root: /home/machoski/Desktop/MambaLP/experiments/MambaIR_RealSR/
   pretrain_network_g: ~
   strict_load_g: true
-  resume_state: /home/eafm23/MambaLP/experiments/MambaIR_RealSR/models/best.pth
- #/home/eafm23/MambaLP/experiments/best/MambaIR_RealSR.pth
+  resume_state: /home/machoski/Desktop/MambaLP/experiments/best.pth
+#/home/eafm23/MambaLP/experiments/MambaIR_RealSR/models/best.pth
 
 # ---------------------------------------
 # TRAINING CONFIG
@@ -110,13 +111,13 @@ train:
   # ---------------------
   pixel_opt:
     type: CharbonnierLoss
-    loss_weight: 0.05
+    loss_weight: 0.1
     reduction: mean
 
   perceptual_opt:
     type: PerceptualLoss
-    perceptual_weight: 0.1
-    contextual_weight: 1.0
+    perceptual_weight: 0.05
+    contextual_weight: 0.5
     style_weight: 0.0
 
     layer_weights:
@@ -125,8 +126,15 @@ train:
       '12': 0.1
       '21': 1.0
 
+  ssim_opt:
+    type: SSIMLoss
+    loss_weight: 0.1
+    window_size: 11
+    max_val: 1.0
+    reduction: mean
+
   ocr_opt:
-    load: /home/eafm23/MambaLP/ocr/model.pth
+    load: /home/machoski/Desktop/MambaLP/ocr/model.pth
     alphabet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     loss_weight: 0.01
     input_size: [32, 96]
