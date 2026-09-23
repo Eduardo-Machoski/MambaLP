@@ -415,11 +415,12 @@ class SRModel(BaseModel):
 
             self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
 
-            self._log_ocr_metric_values(current_iter, dataset_name, ocr_results, ocr_examples, tb_logger, top_k=int(ocr_metrics_opt.get('top_k_errors', 10)),)
+        self._log_ocr_metric_values(current_iter, dataset_name, ocr_results, ocr_examples, tb_logger, top_k=int(ocr_metrics_opt.get('top_k_errors', 10)),)
 
         return {
             'dataset': dataset_name,
             'ocr': ocr_results.plate_accuracy,
+            'ocr_chars_any_position': ocr_results.character_accuracy_any_position,
             'psnr': self.metric_results.get('psnr') if with_metrics else None,
         }
 
@@ -550,6 +551,9 @@ class SRModel(BaseModel):
         return {
             'dataset': dataset_name,
             'ocr': ocr_results.plate_accuracy if use_ocr_metrics else None,
+            'ocr_chars_any_position': (
+                ocr_results.character_accuracy_any_position if use_ocr_metrics else None
+            ),
             'psnr': self.metric_results.get('psnr') if with_metrics else None,
         }
 
@@ -567,6 +571,9 @@ class SRModel(BaseModel):
             f'OCR validation {dataset_name} @ {current_iter} iter',
             (f'\t# plate_accuracy: {results.plate_accuracy:.4f} '
              f'({results.correct_plates}/{results.total_plates})'),
+            (f'\t# character_accuracy_any_position: '
+             f'{results.character_accuracy_any_position:.4f} '
+             f'({results.correct_characters_any_position}/{results.total_characters})'),
             '\t# accuracy_by_position:',
         ]
 
@@ -609,6 +616,11 @@ class SRModel(BaseModel):
             prefix = f'ocr/{dataset_name}'
             tb_logger.add_scalar(
                 f'{prefix}/plate_accuracy', results.plate_accuracy, current_iter
+            )
+            tb_logger.add_scalar(
+                f'{prefix}/character_accuracy_any_position',
+                results.character_accuracy_any_position,
+                current_iter,
             )
             for position, accuracy in results.position_accuracies().items():
                 tb_logger.add_scalar(

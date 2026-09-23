@@ -44,7 +44,7 @@ datasets:
     use_shuffle: true
     num_worker_per_gpu: 1
     batch_size_per_gpu: 1
-    dataset_enlarge_ratio: 2
+    dataset_enlarge_ratio: 1
     lq_size: *lq_size_base
 
 
@@ -82,7 +82,8 @@ path:
   experiments_root: /home/machoski/Desktop/MambaLP/experiments/MambaIR_RealSR/
   pretrain_network_g: ~
   strict_load_g: true
-  resume_state: /home/machoski/Desktop/MambaLP/experiments/best.pth
+  resume_state: ~  
+#resume_state: /home/machoski/Desktop/MambaLP/experiments/best.pth
 #/home/eafm23/MambaLP/experiments/MambaIR_RealSR/models/best.pth
 
 # ---------------------------------------

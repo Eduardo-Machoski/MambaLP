@@ -13,6 +13,8 @@ class OCRRecognitionMetrics:
 
     total_plates: int = 0
     correct_plates: int = 0
+    total_characters: int = 0
+    correct_characters_any_position: int = 0
     position_total: Counter = field(default_factory=Counter)
     position_correct: Counter = field(default_factory=Counter)
     char_total: Counter = field(default_factory=Counter)
@@ -26,6 +28,15 @@ class OCRRecognitionMetrics:
 
             self.total_plates += 1
             self.correct_plates += int(target == prediction)
+
+            # Compare each plate as a multiset: repeated characters count only
+            # as often as they occur in both GT and prediction. Keep plates
+            # separate so characters from another plate cannot match this one.
+            # The longer length counts insertions as errors too.
+            self.total_characters += max(len(target), len(prediction))
+            self.correct_characters_any_position += sum(
+                (Counter(target) & Counter(prediction)).values()
+            )
 
             max_len = max(len(target), len(prediction))
             for position in range(max_len):
@@ -69,6 +80,12 @@ class OCRRecognitionMetrics:
             return 0.0
         return self.correct_plates / self.total_plates
 
+    @property
+    def character_accuracy_any_position(self) -> float:
+        if self.total_characters == 0:
+            return 0.0
+        return self.correct_characters_any_position / self.total_characters
+
     def position_accuracies(self) -> dict[int, float]:
         return {
             position: self.position_correct[position] / total
@@ -89,5 +106,3 @@ class OCRRecognitionMetrics:
             (expected, predicted, count)
             for (expected, predicted), count in self.confusions.most_common(limit)
         ]
-
-
