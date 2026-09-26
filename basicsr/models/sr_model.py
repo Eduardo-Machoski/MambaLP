@@ -156,10 +156,13 @@ class SRModel(BaseModel):
 
     def feed_data(self, data):
         self.lq = data['lq'].to(self.device)
-        self.gt = data['gt'].to(self.device)
+        if data.get('gt') is not None:
+            self.gt = data['gt'].to(self.device)
+        elif hasattr(self, 'gt'):
+            del self.gt
 
         self.lq_path = data["lq_path"]
-        self.gt_path = data["gt_path"]
+        self.gt_path = data.get("gt_path")
 
         self.label = data.get("label")
 
@@ -244,6 +247,29 @@ class SRModel(BaseModel):
             self.net_g.train()
 
 
+    def _run_test_inference(self):
+        benchmark = getattr(self, 'inference_benchmark', None)
+        if benchmark is None:
+            self.test()
+        else:
+            benchmark.run(self.test, tuple(self.lq.shape))
+
+    def _update_ocr_dashboard(self, results, processed, total):
+        dashboard = getattr(self, 'ocr_dashboard', None)
+        if dashboard is not None:
+            dashboard.update(results, processed, total)
+
+    def _save_ocr_result(self, target, prediction, lq_path, gt_path=None,
+                         hr_candidates=None, image_index=0):
+        store = getattr(self, 'ocr_result_store', None)
+        if store is not None:
+            store.save(
+                sr_rgb=tensor2img(self.output[image_index], rgb2bgr=False),
+                lr_rgb=tensor2img(self.lq[image_index], rgb2bgr=False),
+                target=target, prediction=prediction, lq_path=lq_path,
+                gt_path=gt_path, hr_candidates=hr_candidates,
+            )
+
     @staticmethod
     def _update_validation_progress(current, total, bar_width=30):
         if total <= 0:
@@ -272,6 +298,7 @@ class SRModel(BaseModel):
 
 
     def nondist_validation_temporal(self, dataloader, current_iter, tb_logger, save_img):
+        logger = get_root_logger()
         total = len(dataloader)
 
         dataset_name = dataloader.dataset.opt['name']
@@ -299,7 +326,7 @@ class SRModel(BaseModel):
         if with_metrics:
             self.metric_results = {metric: 0 for metric in self.metric_results}
 
-        metric_data = dict()
+        reference_metric_count = 0
 
         dataset = dataloader.dataset
 
@@ -309,20 +336,16 @@ class SRModel(BaseModel):
             folder = osp.dirname(original_lq_path)
 
             sample = dataset.samples[idx]
-            gt_path = val_data["gt_path"][0]
+            gt_paths = val_data.get("gt_path")
+            gt_path = gt_paths[0] if gt_paths else None
             label = val_data["label"]
             if isinstance(label, (list, tuple)):
                 label = str(label[0])
             else:
                 label = str(label)
 
-            # Finds all lq images in the same track
-            lq_paths = []
-
-            for extension in ("png", "jpg", "jpeg"):
-                lq_paths.extend(glob.glob(osp.join(folder, f"lr-*.{extension}")))
-
-            lq_paths = sorted(lq_paths)
+            # Use the dataset index, including LR_ names and uppercase extensions.
+            lq_paths = sorted(sample['lq_candidates'])
 
             if len(lq_paths) == 0:
                 logger.warning(f"Nenhuma imagem LR encontrada em {folder}")
@@ -338,19 +361,18 @@ class SRModel(BaseModel):
 
                 # [C, H, W] -> [B, C, H, W]
                 img_lq = img_lq.unsqueeze(0)
-                img_gt = img_gt.unsqueeze(0)
 
                 current_data = {
                         "lq": img_lq,
                         "label": label,
                         "lq_path": lq_path,
-                        "gt": img_gt,
-                        "gt_path": gt_path
                     }
+                if img_gt is not None:
+                    current_data.update(gt=img_gt.unsqueeze(0), gt_path=gt_path)
 
                 # SR
                 self.feed_data(current_data)
-                self.test()
+                self._run_test_inference()
 
                 # OCR
                 prediction = self.cri_ocr.predict(self.output)
@@ -364,18 +386,21 @@ class SRModel(BaseModel):
 
                 prediction = str(prediction).strip().upper()
                 track_predictions.append(prediction)
+                self._save_ocr_result(label, prediction, lq_path, gt_path,
+                                      hr_candidates=sample.get('gt_candidates'))
 
 
             final_prediction = ocr_results.majority_vote(track_predictions)
 
             ocr_results.update([label], [final_prediction])
+            self._update_ocr_dashboard(ocr_results, idx + 1, total)
             if log_examples and len(ocr_examples) < max_examples:
                 ocr_examples.append((osp.basename(lq_path), label, prediction))
 
 
             visuals = self.get_current_visuals()
             sr_img = tensor2img([visuals['result']])
-            metric_data['img'] = sr_img
+            metric_data = {'img': sr_img}
             if 'gt' in visuals:
                 gt_img = tensor2img([visuals['gt']])
                 metric_data['img2'] = gt_img
@@ -384,7 +409,8 @@ class SRModel(BaseModel):
             # tentative for out of GPU memory
             del self.lq
             del self.output
-            torch.cuda.empty_cache()
+            if getattr(self, 'inference_benchmark', None) is None:
+                torch.cuda.empty_cache()
 
 
             if save_img:
@@ -401,19 +427,23 @@ class SRModel(BaseModel):
                                                  f'{img_name}_{self.opt["name"]}.png')
                 imwrite(sr_img, save_img_path)
 
-            if with_metrics:
-                # calculate metrics
+            if with_metrics and 'img2' in metric_data:
                 for name, opt_ in self.opt['val']['metrics'].items():
                     self.metric_results[name] += calculate_metric(metric_data, opt_)
+                reference_metric_count += 1
 
 
         if with_metrics:
-            for metric in self.metric_results.keys():
-                self.metric_results[metric] /= (idx + 1)
-                # update the best metric result
-                self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
-
-            self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
+            if reference_metric_count:
+                for metric in self.metric_results:
+                    self.metric_results[metric] /= reference_metric_count
+                    self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
+                self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
+            else:
+                self.metric_results = {name: None for name in self.metric_results}
+            get_root_logger().info(
+                'Reference image metrics: %d/%d evaluated items have HR; items without HR are excluded.',
+                reference_metric_count, total)
 
         self._log_ocr_metric_values(current_iter, dataset_name, ocr_results, ocr_examples, tb_logger, top_k=int(ocr_metrics_opt.get('top_k_errors', 10)),)
 
@@ -421,7 +451,9 @@ class SRModel(BaseModel):
             'dataset': dataset_name,
             'ocr': ocr_results.plate_accuracy,
             'ocr_chars_any_position': ocr_results.character_accuracy_any_position,
+            'ocr_details': ocr_results.to_dict(),
             'psnr': self.metric_results.get('psnr') if with_metrics else None,
+            'reference_metric_count': reference_metric_count,
         }
 
 
@@ -454,18 +486,27 @@ class SRModel(BaseModel):
         if with_metrics:
             self.metric_results = {metric: 0 for metric in self.metric_results}
 
-        metric_data = dict()
+        reference_metric_count = 0
 
         for idx, val_data in enumerate(dataloader):
             self._update_validation_progress(idx + 1, total)
             img_name = osp.splitext(osp.basename(val_data['lq_path'][0]))[0]
             self.feed_data(val_data)
-            self.test()
+            self._run_test_inference()
 
             if use_ocr_metrics:
                 labels = [str(label) for label in val_data['label']]
                 predictions = self.cri_ocr.predict(self.output)
+                for image_index, (label, prediction, lq_path) in enumerate(
+                        zip(labels, predictions, val_data['lq_path'])):
+                    gt_paths = val_data.get('gt_path')
+                    self._save_ocr_result(
+                        label, prediction, lq_path,
+                        gt_paths[image_index] if gt_paths else None,
+                        image_index=image_index,
+                    )
                 ocr_results.update(labels, predictions)
+                self._update_ocr_dashboard(ocr_results, idx + 1, total)
 
                 if log_examples and len(ocr_examples) < max_examples:
                     for label, prediction, path in zip(labels, predictions, val_data['lq_path']):
@@ -475,7 +516,7 @@ class SRModel(BaseModel):
 
             visuals = self.get_current_visuals()
             sr_img = tensor2img([visuals['result']])
-            metric_data['img'] = sr_img
+            metric_data = {'img': sr_img}
             if 'gt' in visuals:
                 gt_img = tensor2img([visuals['gt']])
                 metric_data['img2'] = gt_img
@@ -484,7 +525,8 @@ class SRModel(BaseModel):
             # tentative for out of GPU memory
             del self.lq
             del self.output
-            torch.cuda.empty_cache()
+            if getattr(self, 'inference_benchmark', None) is None:
+                torch.cuda.empty_cache()
 
             if save_img:
                 if self.opt['is_train']:
@@ -499,44 +541,22 @@ class SRModel(BaseModel):
                                                  f'{img_name}_{self.opt["name"]}.png')
                 imwrite(sr_img, save_img_path)
 
-            if with_metrics:
-                # calculate metrics
+            if with_metrics and 'img2' in metric_data:
                 for name, opt_ in self.opt['val']['metrics'].items():
                     self.metric_results[name] += calculate_metric(metric_data, opt_)
+                reference_metric_count += 1
 
         if with_metrics:
-            for metric in self.metric_results.keys():
-                self.metric_results[metric] /= (idx + 1)
-                # update the best metric result
-                self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
-
-            self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
-            if save_img:
-                if self.opt['is_train']:
-                    save_img_path = osp.join(self.opt['path']['visualization'], img_name,
-                                             f'{img_name}_{current_iter}.png')
-                else:
-                    if self.opt['val']['suffix']:
-                        save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
-                                                 f'{img_name}_{self.opt["val"]["suffix"]}.png')
-                    else:
-                        save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
-                                                 f'{img_name}_{self.opt["name"]}.png')
-                imwrite(sr_img, save_img_path)
-
-            if with_metrics:
-                # calculate metrics
-                for name, opt_ in self.opt['val']['metrics'].items():
-                    self.metric_results[name] += calculate_metric(metric_data, opt_)
-
-        if with_metrics:
-            for metric in self.metric_results.keys():
-                self.metric_results[metric] /= (idx + 1)
-                # update the best metric result
-                self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
-
-            self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
-
+            if reference_metric_count:
+                for metric in self.metric_results:
+                    self.metric_results[metric] /= reference_metric_count
+                    self._update_best_metric_result(dataset_name, metric, self.metric_results[metric], current_iter)
+                self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
+            else:
+                self.metric_results = {name: None for name in self.metric_results}
+            get_root_logger().info(
+                'Reference image metrics: %d/%d evaluated items have HR; items without HR are excluded.',
+                reference_metric_count, total)
 
         if use_ocr_metrics:
             self._log_ocr_metric_values(
@@ -554,7 +574,9 @@ class SRModel(BaseModel):
             'ocr_chars_any_position': (
                 ocr_results.character_accuracy_any_position if use_ocr_metrics else None
             ),
+            'ocr_details': ocr_results.to_dict() if use_ocr_metrics else None,
             'psnr': self.metric_results.get('psnr') if with_metrics else None,
+            'reference_metric_count': reference_metric_count,
         }
 
     def _log_ocr_metric_values(
@@ -583,6 +605,13 @@ class SRModel(BaseModel):
             lines.append(
                 f'\t  position_{position + 1}: {accuracy:.4f} ({correct}/{total})'
             )
+
+        lines.append('\t# character_precision (correct / predicted):')
+        for row in results.to_dict()['characters']:
+            if row['target_total'] or row['predicted_total']:
+                precision = f"{row['precision']:.4f}" if row['predicted_total'] else 'n/a'
+                lines.append(f"\t  {row['character']}: {precision} "
+                             f"({row['correct']}/{row['predicted_total']})")
 
         lines.append(f'\t# most_error_prone_characters (top {top_k}):')
         error_rows = results.most_error_prone_chars(top_k)
@@ -622,6 +651,8 @@ class SRModel(BaseModel):
                 results.character_accuracy_any_position,
                 current_iter,
             )
+            for char, precision in results.character_precisions().items():
+                tb_logger.add_scalar(f'{prefix}/character_precision/{char}', precision, current_iter)
             for position, accuracy in results.position_accuracies().items():
                 tb_logger.add_scalar(
                     f'{prefix}/position_{position + 1}_accuracy',
