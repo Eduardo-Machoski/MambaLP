@@ -2,6 +2,7 @@ import torch
 from torch.nn import functional as F
 
 from basicsr.utils.registry import MODEL_REGISTRY
+from basicsr.utils.training_viewer import TrainingViewer
 from basicsr.models.sr_model import SRModel
 
 
@@ -114,3 +115,5 @@ def test(self):
         self.output = self.net_g(self.lq)
 
     self.net_g.train()
+    
+

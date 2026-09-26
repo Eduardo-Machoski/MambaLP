@@ -1,0 +1,75 @@
+# Execute: python3 basicsr/test.py -opt basicsr/test_benchmark.yml
+# Ajuste dataroot e checkpoints.
+name: MambaIR_RealSR_TestBenchmark
+model_type: MambaIRModel
+num_gpu: 1
+manual_seed: 99
+datasets:
+  test:
+    task: SR
+    name: UFPR_RealTest
+    type: LPSRPlateDataset
+    phase: test
+    # Split do CSV: test/testing, val/validation ou train/training.
+    # Avaliar training mede desempenho no treino, não no teste independente.
+    split: validation
+    single_lr_per_track: true
+    # HR é opcional em datasets.test: LR + anotação bastam para avaliar OCR.
+    io_backend:
+      type: disk
+    use_hflip: false
+    use_rot: false
+    scale: 2
+    dataroot: /home/machoski/Desktop/datasets/LRLPR/
+    index_file: split_all.csv
+    lq_size:
+      h: 32
+      w: 64
+network_g:
+  type: MambaIR
+  upscale: 2
+  in_chans: 3
+  img_size: 96
+  img_range: 1.0
+  d_state: 16
+  embed_dim: 180
+  depths:
+  - 6
+  - 6
+  - 6
+  - 6
+  - 6
+  - 6
+  mlp_ratio: 2
+  upsampler: pixelshuffle
+  resi_connection: 1conv
+path:
+#  pretrain_network_g: /home/machoski/Desktop/MambaLP/experiments/MambaIR_RealSR/models/best.pth
+  pretrain_network_g: /home/machoski/Desktop/PESOS_NAO_APAGAR/50_porcento.pth
+  param_key_g: params
+  strict_load_g: true
+  resume_state: null
+scale: 2
+ocr_opt:
+  load: /home/machoski/Desktop/MambaLP/ocr/model.pth
+  alphabet: 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ
+  loss_weight: 0.01
+  input_size:
+  - 32
+  - 96
+test:
+  warmup_iterations: 0
+  ocr_dashboard:
+    enabled: true
+    update_interval: 5
+    top_k: 10
+    block_on_finish: true
+  save_ocr_images:
+    enabled: true
+val:
+  save_img: false
+  suffix: null
+  ocr_metrics:
+    enabled: true
+    temporal_fusion:
+      enabled: false

@@ -42,10 +42,14 @@ class BaseModel():
             tb_logger (tensorboard logger): Tensorboard logger.
             save_img (bool): Whether to save images. Default: False.
         """
-        if self.opt['dist']:
-            self.dist_validation(dataloader, current_iter, tb_logger, save_img)
-        else:
-            self.nondist_validation(dataloader, current_iter, tb_logger, save_img)
+        ocr_metrics = self.opt.get('val', {}).get('ocr_metrics', {})
+        temporal_fusion = ocr_metrics.get('temporal_fusion', {})
+        temporal_type = temporal_fusion.get('type', {})
+
+        if temporal_fusion.get('enabled', False):
+            return self.nondist_validation_temporal(dataloader, current_iter, tb_logger, save_img)
+
+        return self.nondist_validation(dataloader, current_iter, tb_logger, save_img)
 
     def _initialize_best_metric_results(self, dataset_name):
         """Initialize the best metric results dict for recording the best metric value and iteration."""
@@ -193,7 +197,7 @@ class BaseModel():
         return [param_group['lr'] for param_group in self.optimizers[0].param_groups]
 
     @master_only
-    def save_network(self, net, net_label, current_iter, param_key='params'):
+    def save_network(self, net, net_label, current_iter, param_key='params', save_filename=None):
         """Save networks.
 
         Args:
@@ -205,7 +209,8 @@ class BaseModel():
         """
         if current_iter == -1:
             current_iter = 'latest'
-        save_filename = f'{net_label}_{current_iter}.pth'
+        if save_filename is None:
+            save_filename = f'{net_label}_{current_iter}.pth'
         save_path = os.path.join(self.opt['path']['models'], save_filename)
 
         net = net if isinstance(net, list) else [net]

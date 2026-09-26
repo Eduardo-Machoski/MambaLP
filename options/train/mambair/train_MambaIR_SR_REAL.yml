@@ -6,10 +6,16 @@
 name: MambaIR_RealSR
 model_type: MambaIRModel
 num_gpu: auto
-manual_seed: 9
+manual_seed: 99
 
-dataset_root: &dataset_root "/home/eafm23/datasets/UFPR-SR-plates"
+dataset_root: &dataset_root "/home/machoski/Desktop/datasets/LRLPR/"
+#dataset_index: &dataset_index "split_scenario_B.csv"
+#dataset_index: &dataset_index "split_teste.csv"
 dataset_index: &dataset_index "split_all.csv"
+
+lq_size_base: &lq_size_base
+  h: 32
+  w: 64
 
 # ---------------------------------------
 # DATASET (real images are not aligned!)
@@ -20,13 +26,13 @@ datasets:
     name: UFPR_Real
     type: LPSRPlateDataset
     phase: 'training'
+    use_amp: true
     io_backend:
       type: disk
 
 
 
     # DatasetConfig
-    gt_size: 64        
     use_hflip: false   
     use_rot: false     
     scale: 2
@@ -37,17 +43,19 @@ datasets:
     # DataLoader
     use_shuffle: true
     num_worker_per_gpu: 1
-    batch_size_per_gpu: 2
-    dataset_enlarge_ratio: 2
+    batch_size_per_gpu: 1
+    dataset_enlarge_ratio: 1
+    lq_size: *lq_size_base
+
 
   val:
     name: UFPR_RealVal
     type: LPSRPlateDataset
     phase: 'validation'
     scale: 2
-    gt_size: 64        
     dataroot: *dataset_root
     index_file: *dataset_index
+    lq_size: *lq_size_base
     io_backend:
       type: disk
 
@@ -71,10 +79,12 @@ network_g:
 # PATH
 # ---------------------------------------
 path:
-  experiments_root: /home/eafm23/MambaIR/experiments/MambaIR_RealSR
+  experiments_root: /home/machoski/Desktop/MambaLP/experiments/MambaIR_RealSR/
   pretrain_network_g: ~
   strict_load_g: true
-  resume_state: ~
+  resume_state: ~  
+#resume_state: /home/machoski/Desktop/MambaLP/experiments/best.pth
+#/home/eafm23/MambaLP/experiments/MambaIR_RealSR/models/best.pth
 
 # ---------------------------------------
 # TRAINING CONFIG
@@ -88,24 +98,27 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [ !!int 50000, !!int 80000 ] 
+    milestones: [ !!int 50000, !!int 100000, !!int 150000 ] 
     gamma: 0.5
 
-  total_iter: !!int 100000
+  total_iter: !!int 200000
   warmup_iter: -1
+
+  viewer:
+    enabled: true
 
   # ---------------------
   # Real-SR loss functions
   # ---------------------
   pixel_opt:
     type: CharbonnierLoss
-    loss_weight: 0.05
+    loss_weight: 0.1
     reduction: mean
 
   perceptual_opt:
     type: PerceptualLoss
-    perceptual_weight: 0.1
-    contextual_weight: 1.0
+    perceptual_weight: 0.05
+    contextual_weight: 0.5
     style_weight: 0.0
 
     layer_weights:
@@ -114,8 +127,15 @@ train:
       '12': 0.1
       '21': 1.0
 
+  ssim_opt:
+    type: SSIMLoss
+    loss_weight: 0.1
+    window_size: 11
+    max_val: 1.0
+    reduction: mean
+
   ocr_opt:
-    load: /home/eafm23/MambaIR/ocr/model.pth
+    load: /home/machoski/Desktop/MambaLP/ocr/model.pth
     alphabet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     loss_weight: 0.01
     input_size: [32, 96]
@@ -124,14 +144,25 @@ train:
 # VALIDATION
 # ---------------------------------------
 val:
+  # OCR and image metrics are calculated at every validation milestone.
   val_freq: !!int 5000
   save_img: false
+
+  ocr_metrics:
+    enabled: true
+    # Log prediction examples only when current_iter is divisible by this value.
+    # Use the same value as val_freq to log examples at every milestone.
+    example_freq: !!int 5000
+    num_examples: 10
+    top_k_errors: 10
+    temporal_fusion:
+      enabled: false
 
   metrics:
     psnr:
       type: calculate_psnr
       crop_border: 2
-      test_y_channel: false
+      test_y_channel: true
 
 
 # ---------------------------------------
@@ -139,7 +170,6 @@ val:
 # ---------------------------------------
 logger:
   print_freq: 500
-  save_checkpoint_freq: !!int 15000
   use_tb_logger: true
   wandb:
     project: ~
@@ -148,4 +178,3 @@ logger:
 dist_params:
   backend: nccl
   port: 29500
-
