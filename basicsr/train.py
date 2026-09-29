@@ -13,7 +13,9 @@ import json
 import shutil
 import time
 import torch
+import numpy as np
 from os import path as osp
+
 
 from basicsr.data import build_dataloader, build_dataset
 from basicsr.data.data_sampler import EnlargedSampler
@@ -23,12 +25,56 @@ from basicsr.utils import (AvgTimer, MessageLogger, check_resume, get_env_info, 
                            init_tb_logger, init_wandb_logger, make_exp_dirs, mkdir_and_rename, scandir)
 from basicsr.utils.options import copy_opt_file, dict2str, parse_options
 
-
 def update_best_checkpoint(model, validation_results, current_iter, logger):
     """Save a checkpoint when OCR improves, using PSNR as the tie-breaker."""
+
+    def to_json_value(value, path='metadata'):
+        """Recursively convert metadata into JSON-compatible types."""
+        if isinstance(value, np.ndarray):
+            return to_json_value(value.tolist(), path)
+
+        if isinstance(value, np.generic):
+            converted = value.item()
+            if isinstance(converted, np.generic):
+                raise TypeError(
+                    f'{path}: unsupported NumPy type {type(value).__name__}'
+                )
+            return to_json_value(converted, path)
+
+        if isinstance(value, torch.Tensor):
+            return to_json_value(value.detach().cpu().tolist(), path)
+
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+
+        if isinstance(value, dict):
+            converted = {}
+            for key, item in value.items():
+                # JSON objects require string keys. Reject other keys
+                # instead of silently changing them or causing collisions.
+                if not isinstance(key, str):
+                    raise TypeError(
+                        f'{path}: dictionary key {key!r} must be a string, '
+                        f'got {type(key).__name__}'
+                    )
+                converted[key] = to_json_value(item, f'{path}[{key!r}]')
+            return converted
+
+        if isinstance(value, (list, tuple)):
+            return [
+                to_json_value(item, f'{path}[{index}]')
+                for index, item in enumerate(value)
+            ]
+
+        raise TypeError(
+            f'{path}: type {type(value).__name__} is not JSON serializable'
+        )
+
     results = [result for result in validation_results if result is not None]
     if not results:
-        logger.info(f'Checkpoint @ {current_iter}: not saved (no validation result).')
+        logger.info(
+            f'Checkpoint @ {current_iter}: not saved (no validation result).'
+        )
         return False
 
     if any(result['ocr'] is None or result['psnr'] is None for result in results):
@@ -41,6 +87,7 @@ def update_best_checkpoint(model, validation_results, current_iter, logger):
     # Multiple validation datasets are represented by their arithmetic mean.
     current_ocr = sum(result['ocr'] for result in results) / len(results)
     current_psnr = sum(result['psnr'] for result in results) / len(results)
+
     models_dir = model.opt['path']['models']
     metadata_path = osp.join(models_dir, 'best_metrics.json')
     best_path = osp.join(models_dir, 'best.pth')
@@ -51,11 +98,15 @@ def update_best_checkpoint(model, validation_results, current_iter, logger):
             with open(metadata_path, 'r', encoding='utf-8') as metadata_file:
                 best = json.load(metadata_file)
         except (OSError, ValueError, TypeError) as error:
-            logger.warning(f'Could not read {metadata_path}: {error}. Reinitializing best metrics.')
+            logger.warning(
+                f'Could not read {metadata_path}: {error}. '
+                'Reinitializing best metrics.'
+            )
 
     if best is not None and not osp.isfile(best_path):
         logger.warning(
-            f'{metadata_path} exists but best.pth does not. Reinitializing best metrics.'
+            f'{metadata_path} exists but best.pth does not. '
+            'Reinitializing best metrics.'
         )
         best = None
 
@@ -64,6 +115,7 @@ def update_best_checkpoint(model, validation_results, current_iter, logger):
         or current_ocr > best['ocr']
         or (current_ocr == best['ocr'] and current_psnr > best['psnr'])
     )
+
     if not is_best:
         logger.info(
             f'Checkpoint @ {current_iter}: not saved; not the best. '
@@ -73,29 +125,43 @@ def update_best_checkpoint(model, validation_results, current_iter, logger):
         )
         return False
 
+    metadata = {
+        'iter': current_iter,
+        'ocr': current_ocr,
+        'psnr': current_psnr,
+    }
+
+    # Convert every value and validate serialization before saving weights.
+    # Future fields added to metadata are processed automatically.
+    metadata_json = json.dumps(to_json_value(metadata), indent=2)
+
     if best is not None and osp.isfile(best_path):
         archived_path = osp.join(models_dir, f'{best["iter"]}.pth')
         if not osp.exists(archived_path):
             shutil.copy2(best_path, archived_path)
         else:
             logger.warning(
-                f'Previous best archive {archived_path} already exists; keeping it unchanged.'
+                f'Previous best archive {archived_path} already exists; '
+                'keeping it unchanged.'
             )
 
     model.save_best()
-    metadata = {'iter': current_iter, 'ocr': current_ocr, 'psnr': current_psnr}
+
     temporary_metadata_path = f'{metadata_path}.tmp'
     with open(temporary_metadata_path, 'w', encoding='utf-8') as metadata_file:
-        json.dump(metadata, metadata_file, indent=2)
+        metadata_file.write(metadata_json)
     os.replace(temporary_metadata_path, metadata_path)
 
-    previous = 'first validation' if best is None else f'previous best @ {best["iter"]} iter'
+    previous = (
+        'first validation'
+        if best is None
+        else f'previous best @ {best["iter"]} iter'
+    )
     logger.info(
         f'Checkpoint @ {current_iter}: saved as best.pth; new best. '
         f'OCR={current_ocr:.4f}, PSNR={current_psnr:.4f} ({previous}).'
     )
     return True
-
 
 def init_tb_loggers(opt):
     # initialize wandb logger before tensorboard logger to allow proper sync

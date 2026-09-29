@@ -8,7 +8,7 @@ model_type: MambaIRModel
 num_gpu: auto
 manual_seed: 99
 
-dataset_root: &dataset_root "/home/machoski/Desktop/datasets/LRLPR/"
+dataset_root: &dataset_root "/home/eafm23/datasets/LRLPR/"
 #dataset_index: &dataset_index "split_scenario_B.csv"
 #dataset_index: &dataset_index "split_teste.csv"
 dataset_index: &dataset_index "split_all.csv"
@@ -79,7 +79,7 @@ network_g:
 # PATH
 # ---------------------------------------
 path:
-  experiments_root: /home/machoski/Desktop/MambaLP/experiments/MambaIR_RealSR/
+  experiments_root: /home/eafm23/MambaLP/experiments/MambaIR_RealSR/
   pretrain_network_g: ~
   strict_load_g: true
   resume_state: ~  
@@ -98,14 +98,14 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [ !!int 50000, !!int 100000, !!int 150000 ] 
+    milestones: [ !!int 50000, !!int 100000, !!int 150000 , !!int 200000, !!int 250000, !!int 300000, !!int 350000] 
     gamma: 0.5
 
-  total_iter: !!int 200000
+  total_iter: !!int 400000
   warmup_iter: -1
 
   viewer:
-    enabled: true
+    enabled: false
 
   # ---------------------
   # Real-SR loss functions
@@ -135,7 +135,7 @@ train:
     reduction: mean
 
   ocr_opt:
-    load: /home/machoski/Desktop/MambaLP/ocr/model.pth
+    load: /home/eafm23/MambaLP/ocr/model.pth
     alphabet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     loss_weight: 0.01
     input_size: [32, 96]
